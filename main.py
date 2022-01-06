@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import keras
 from keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img
 from keras.callbacks import CSVLogger, ModelCheckpoint, EarlyStopping,ReduceLROnPlateau
-from keras.models import Sequential, save_model
+from keras.models import Sequential, save_model, load_model
 from keras.layers.core import Dense, Dropout, Activation, Flatten
 from keras.layers.convolutional import Conv2D, MaxPooling2D, SeparableConv2D
 from keras.utils import np_utils
@@ -21,6 +21,7 @@ from keras.models import Model
 from keras.models import model_from_json
 from tensorflow.keras import layers
 from keras.applications.inception_v3 import InceptionV3
+from sklearn.utils import resample
 
 
 from sklearn.model_selection import train_test_split
@@ -34,12 +35,12 @@ from sklearn.metrics import roc_curve, roc_auc_score
 def define_consts():
     batch_size = 16
     num_epochs = 50
-    input_shape = (48, 48, 1)
+    input_shape = (144, 144, 1)
     validation_split = .2
     verbose = 1
     num_classes = 7
     base_path = 'models/'
-    image_size=(48,48)
+    image_size=(144,144)
     labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
     result = ['Very unlikely', 'Unlikely', 'Possible', 'Likely', 'Very likely']
     floor = [(0, 0.19), (0.2, 0.39), (0.4, 0.59), (0.6, 0.79), (0.8, 1)]
@@ -48,12 +49,26 @@ def define_consts():
 def read_data(image_size):
     data = pd.read_csv('./data/fer2013/fer2013.csv')
     print(len(data))
+    data = data.head(13000)
+    # Separate majority and minority classes
+    df_minority = data[data['emotion']==1]
+ 
+    # Upsample minority class
+    df_minority_upsampled = resample(df_minority, 
+                                 replace=True,     # sample with replacement
+                                 n_samples=1525,    # to match majority class
+                                 random_state=123) # reproducible results
+ 
+    # Combine majority class with upsampled minority class
+    data = pd.concat([data, df_minority_upsampled])
+ 
+    # Display new class counts
+    print(data['emotion'].value_counts())
     data['pixels']=data['pixels'].astype("string")
-    # print(data['pixels'])
     pixels = data['pixels'].tolist()
     width, height = 48, 48
     faces = []
-    # iterate through all pixels and create a matrix(face) of size 48 x 48
+    # iterate through all pixels and create a matrix(face) of size 48 x 48, then resize it to 144 x 144
     for pixel_sequence in pixels:
         face = [int(pixel) for pixel in pixel_sequence.strip().split(' ',48*48)]
         if len(face) == 2304:
@@ -87,9 +102,9 @@ def read_data(image_size):
     return xtrain, xtest, ytrain, ytest, xval, xtest, yval, ytest, datagen
 
 
-def CNN():
+def create_CNN(input_shape):
     model = Sequential(name='CNN')
-    model.add(Conv2D(64, (3, 3), padding='same', input_shape=(48,48,1)))
+    model.add(Conv2D(64, (3, 3), padding='same', input_shape=input_shape))
     model.add(BatchNormalization())
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2, 2), strides=None, padding='same'))
@@ -128,10 +143,11 @@ def CNN():
     model.add(Dense(7))
     model.add(Activation('softmax'))
     
+    model.summary()
+    
     return model
 
-def setup_cnn(base_path, datagen, xtrain, ytrain, batch_size, num_epochs, xval, yval):
-    CNN=CNN()
+def setup_cnn(CNN, base_path, datagen, xtrain, ytrain, batch_size, num_epochs, xval, yval):
 
     early_stop = EarlyStopping('val_loss', patience=100)
     reduce_lr = ReduceLROnPlateau('val_loss', factor=0.1,
@@ -162,13 +178,14 @@ def save_model_to_json(CNN):
     print("Saved model to disk")
 
 
-def get_model_from_json():
+def get_model_from_json(input_shape):
     json_file = open('model.json', 'r')
     loaded_model_json = json_file.read()
     json_file.close()
     CNN = model_from_json(loaded_model_json)
     # load weights into new model
     CNN.load_weights("model.h5")
+    #CNN = load_model('models/CNN.40-0.66.hdf5')
     print("Loaded model from disk")
     # evaluate loaded model on test data
     CNN.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
@@ -224,14 +241,15 @@ def test_metrics(CNN, xtest, ytest, labels, result, floor):
 def test_image(CNN, image_size, floor, result, labels):
     from PIL import Image
 
-    image = Image.open('happy1.jpg')
+    image = Image.open('cry.jpg')
 
-    size = (72,72)
+    size = (144,144)
     #image = image.resize(size, Image.ANTIALIAS)
 
     plt.figure()
     plt.imshow(image) 
     plt.show()  # display it
+    
     pixels_image = image.getdata()
     pixels_image = list(pixels_image)
 
@@ -247,15 +265,20 @@ def test_image(CNN, image_size, floor, result, labels):
 
     print(len(pixels_list))
     print(pixels_list)
+    
     faces = []
 
+    
     face = pixels_list
     face = np.asarray(face)
     face = cv2.resize(face.astype('uint8'),image_size)
     faces.append(face.astype('float32'))
     
     faces = np.asarray(faces)
-    #faces = np.expand_dims(faces, -1)
+    faces = np.expand_dims(faces, -1)
+    faces /= 127.5
+    faces -= 1.
+    
 
     plt.figure()
     plt.imshow(face) 
@@ -269,20 +292,26 @@ def test_image(CNN, image_size, floor, result, labels):
     fig = figure(figsize=(10, 10))
 
     ypred=CNN.predict(faces)
+    print(np.argmax(ypred[0]))
     label = 0
+    print(ypred[0])
     for p in ypred[0]:
         ind = 0
         for i in range(len(floor)):
             if p >= floor[i][0] and p <= floor[i][1]:
                 ind = i
-        print(labels[label], result[ind])
+        print(labels[label], ': ', result[ind])
         label = label + 1
 
 if __name__ == '__main__':
     batch_size, num_epochs, input_shape, validation_split, verbose, num_classes, base_path, image_size, labels, result, floor = define_consts()
     xtrain, xtest, ytrain, ytest, xval, xtest, yval, ytest, datagen = read_data(image_size)
-    #setup_cnn(base_path, datagen, xtrain, ytrain, batch_size, num_epochs, xval, yval)
-    CNN = get_model_from_json()
+    CNN = create_CNN(input_shape)
+    #setup_cnn(CNN, base_path, datagen, xtrain, ytrain, batch_size, num_epochs, xval, yval)
+    CNN = get_model_from_json(input_shape)
+    #CNN.summary();
+    #score = CNN.evaluate(xtest, ytest, verbose=0)
+    #print("%s: %.2f%%" % (CNN.metrics_names[1], score[1]*100))
     #test_metrics(CNN, xtest, ytest, labels, result, floor)
-    test_image(CNN, image_size, floor, result, labels)
+    test_image(CNN, (144,144), floor, result, labels)
     
